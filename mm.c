@@ -103,7 +103,7 @@ void insertclass(char *newp, unsigned int size, int num) {
 }
 
 void dropclass(char *ptr, int num) {
-  if(num==-1){
+  if (num == -1) {
     return;
   }
   char *pre = GET_PRE(ptr);
@@ -119,26 +119,25 @@ void dropclass(char *ptr, int num) {
 }
 
 int getclassnum(unsigned int size) {
-  if(size < (8 + 2 * SIZE_T_SIZE)){
+  if (size < (8 + 2 * SIZE_T_SIZE)) {
     return -1;
   }
   int num = 0;
   while ((size >>= 1) > 0) {
     num++;
   }
-  return num-4;
+  return num - 4;
 }
 
 void findgoodplace(char *newp, unsigned int size) {
   int num = getclassnum(size);
-  if (num==-1) {
+  if (num == -1) {
     PUT(newp, size);
     PUT_END(newp, size);
     return;
   }
   insertclass(newp, size, num);
 }
-
 
 /*
  * mm_init - initialize the malloc package.
@@ -151,7 +150,7 @@ int mm_init(void) {
   if (mem_start == store_start) {
     return -1;
   } else {
-    for (char *tmp = mem_start; tmp < store_start; tmp += SIZE_T_SIZE) { 
+    for (char *tmp = mem_start; tmp < store_start; tmp += SIZE_T_SIZE) {
       *(char **)tmp = NULL;
     } // here to init into NULL
   }
@@ -170,7 +169,7 @@ void *mm_malloc(size_t size) {
   size_t newsize = BLOCKSIZE(size);
   int num = getclassnum(newsize);
   while (num < 21) {
-    if(num == -1){
+    if (num == -1) {
       break;
     }
     char *tmp = ((char **)mem_start)[num];
@@ -194,17 +193,32 @@ void *mm_malloc(size_t size) {
     }
     num++;
   } // find useless block
-  char *newpp = mem_sbrk(newsize);
-  if (newpp == (void *)-1) {
-    return NULL;
+  char *endpp = (char *)mem_heap_hi() - 7;
+  int vid = GETALLO(endpp);
+  if (vid == 0) {
+    unsigned int endsize = GETSIZE(endpp);
+    endpp = endpp - endsize + 4;
+    dropclass(endpp, getclassnum(endsize));
+    unsigned int less_size = newsize - endsize;
+    mem_sbrk(less_size);
+    PUT(endpp, newsize | 1);
+    PUT_END(endpp, newsize | 1);
+    char *endpoint = (char *)mem_heap_hi() - 3;
+    PUT(endpoint, 1);
+    return endpp + 4;
+  } else {
+    char *newpp = mem_sbrk(newsize);
+    if (newpp == (void *)-1) {
+      return NULL;
+    }
+    newpp -= 4; // 减去之前标志结尾的4字节
+    newsize |= 1;
+    PUT(newpp, newsize);
+    PUT_END(newpp, newsize);
+    char *endpoint = (char *)mem_heap_hi() - 3;
+    PUT(endpoint, 1);
+    return newpp + 4;
   }
-  newpp -= 4; // 减去之前标志结尾的4字节
-  newsize |= 1;
-  PUT(newpp, newsize);
-  PUT_END(newpp, newsize);
-  char *endpoint = (char *)mem_heap_hi() - 3;
-  PUT(endpoint, 1);
-  return newpp + 4; // no useless block, so we must new one
 }
 
 /*
