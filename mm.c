@@ -46,7 +46,7 @@ char *mem_start;
 char *store_start;
 
 // my define micro
-#define ARRSIZE (SIZE_T_SIZE * 25)
+#define ARRSIZE (SIZE_T_SIZE * 21)
 #define MINSIZE (8 + SIZE_T_SIZE * 2)
 #define FBLOCKSIZE(x) (ALIGN(x + MINSIZE))
 #define BLOCKSIZE(x) (ALIGN(x + 8))
@@ -103,7 +103,7 @@ void insertclass(char *newp, unsigned int size, int num) {
 }
 
 void dropclass(char *ptr, int num) {
-  if (GETSIZE(ptr) < 8 + 2 * SIZE_T_SIZE) {
+  if(num==-1){
     return;
   }
   char *pre = GET_PRE(ptr);
@@ -117,6 +117,28 @@ void dropclass(char *ptr, int num) {
     PUT_PRE(next, pre);
   }
 }
+
+int getclassnum(unsigned int size) {
+  if(size < (8 + 2 * SIZE_T_SIZE)){
+    return -1;
+  }
+  int num = 0;
+  while ((size >>= 1) > 0) {
+    num++;
+  }
+  return num-4;
+}
+
+void findgoodplace(char *newp, unsigned int size) {
+  int num = getclassnum(size);
+  if (num==-1) {
+    PUT(newp, size);
+    PUT_END(newp, size);
+    return;
+  }
+  insertclass(newp, size, num);
+}
+
 
 /*
  * mm_init - initialize the malloc package.
@@ -137,23 +159,6 @@ int mm_init(void) {
   PUT((store_start + 4), 1);
   return 0;
 }
-int getclassnum(unsigned int size) {
-  int num = 0;
-  while ((size >>= 1) > 0) {
-    num++;
-  }
-  return num;
-}
-
-void findgoodplace(char *newp, unsigned int size) {
-  if (size < (8 + 2 * SIZE_T_SIZE)) {
-    PUT(newp, size);
-    PUT_END(newp, size);
-    return;
-  }
-  int num = getclassnum(size);
-  insertclass(newp, size, num);
-}
 
 /*
 
@@ -164,7 +169,10 @@ void *mm_malloc(size_t size) {
   } // we donnot do this
   size_t newsize = BLOCKSIZE(size);
   int num = getclassnum(newsize);
-  while (num < 25) {
+  while (num < 21) {
+    if(num == -1){
+      break;
+    }
     char *tmp = ((char **)mem_start)[num];
     while (tmp != NULL) {
       unsigned int ns = GETSIZE(tmp);
