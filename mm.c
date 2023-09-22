@@ -19,6 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "memlib.h"
 #include "mm.h"
 
@@ -139,6 +140,60 @@ void findgoodplace(char *newp, unsigned int size) {
   insertclass(newp, size, num);
 }
 
+char *findbestblock(unsigned int size) {
+  int num = getclassnum(size);
+  while (num < 21) {
+    if (num == -1) {
+      return NULL;
+    }
+    char *tmp = ((char **)mem_start)[num];
+    while (tmp != NULL) {
+      unsigned int ns = GETSIZE(tmp);
+      if (ns >= size) {
+        return tmp;
+      }
+      tmp = GET_NEXT(tmp);
+    } // find it
+    num++;
+  }
+  return NULL;
+}
+
+/*
+  拓展堆newsize的大小，但是如果最后一个块是空闲的，则其大小算在newsize内
+  返回值为最后一个块的数据开头，且块已经标记为占用
+*/
+char *extendheap(unsigned int newsize) {
+  char *endpp = (char *)mem_heap_hi() - 7;
+  int vid = GETALLO(endpp);
+  if (vid == 0) {
+    // 最后一个块空闲
+    unsigned int endsize = GETSIZE(endpp);
+    endpp = endpp - endsize + 4;
+    dropclass(endpp, getclassnum(endsize));
+    unsigned int less_size = newsize - endsize;
+    mem_sbrk(less_size);
+    PUT(endpp, newsize | 1);
+    PUT_END(endpp, newsize | 1);
+    char *endpoint = (char *)mem_heap_hi() - 3;
+    PUT(endpoint, 1);
+    return endpp + 4;
+  } else {
+    // 最后一个块不空闲
+    char *newpp = mem_sbrk(newsize);
+    if (newpp == (void *)-1) {
+      return NULL;
+    }
+    newpp -= 4; // 减去之前标志结尾的4字节
+    newsize |= 1;
+    PUT(newpp, newsize);
+    PUT_END(newpp, newsize);
+    char *endpoint = (char *)mem_heap_hi() - 3;
+    PUT(endpoint, 1);
+    return newpp + 4;
+  }
+}
+
 /*
  * mm_init - initialize the malloc package.
  */
@@ -167,58 +222,26 @@ void *mm_malloc(size_t size) {
     return NULL;
   } // we donnot do this
   size_t newsize = BLOCKSIZE(size);
-  int num = getclassnum(newsize);
-  while (num < 21) {
-    if (num == -1) {
-      break;
-    }
-    char *tmp = ((char **)mem_start)[num];
-    while (tmp != NULL) {
-      unsigned int ns = GETSIZE(tmp);
-      if (ns >= newsize) {
-        int tnum = getclassnum(ns);
-        dropclass(tmp, tnum);
-        unsigned int usi_cp = newsize;
-        newsize |= 1;
-        PUT(tmp, newsize);
-        PUT_END(tmp, newsize);
-        if (ns > usi_cp) {
-          char *newp = tmp + usi_cp;
-          ns -= usi_cp;
-          findgoodplace(newp, ns);
-        }
-        return tmp + 4;
-      } // find it
-      tmp = GET_NEXT(tmp);
-    }
-    num++;
-  } // find useless block
-  char *endpp = (char *)mem_heap_hi() - 7;
-  int vid = GETALLO(endpp);
-  if (vid == 0) {
-    unsigned int endsize = GETSIZE(endpp);
-    endpp = endpp - endsize + 4;
-    dropclass(endpp, getclassnum(endsize));
-    unsigned int less_size = newsize - endsize;
-    mem_sbrk(less_size);
-    PUT(endpp, newsize | 1);
-    PUT_END(endpp, newsize | 1);
-    char *endpoint = (char *)mem_heap_hi() - 3;
-    PUT(endpoint, 1);
-    return endpp + 4;
-  } else {
-    char *newpp = mem_sbrk(newsize);
-    if (newpp == (void *)-1) {
-      return NULL;
-    }
-    newpp -= 4; // 减去之前标志结尾的4字节
+
+  // 在空闲链表种子找到最适合的块
+  char *tmp = findbestblock(newsize);
+  if (tmp != NULL) {
+    unsigned int ns = GETSIZE(tmp);
+    int tnum = getclassnum(ns);
+    dropclass(tmp, tnum);
+    unsigned int usi_cp = newsize;
     newsize |= 1;
-    PUT(newpp, newsize);
-    PUT_END(newpp, newsize);
-    char *endpoint = (char *)mem_heap_hi() - 3;
-    PUT(endpoint, 1);
-    return newpp + 4;
+    PUT(tmp, newsize);
+    PUT_END(tmp, newsize);
+    if (ns > usi_cp) {
+      char *newp = tmp + usi_cp;
+      ns -= usi_cp;
+      findgoodplace(newp, ns);
+    }
+    return tmp + 4;
   }
+  // 没找到空闲块
+  return extendheap(newsize);
 }
 
 /*
@@ -250,25 +273,197 @@ void mm_free(void *ptr) {
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
+
 void *mm_realloc(void *ptr, size_t size) {
   if (ptr == NULL) {
     return mm_malloc(size);
   }
-  char *old_start = (char *)ptr - 4;
-  unsigned int old_size = GETSIZE(old_start);
-  unsigned int new_size = BLOCKSIZE(size);
-  if (old_size > new_size) {
-    PUT(old_start, (new_size | 1));
-    PUT_END(old_start, (new_size | 1));
-    char *new_start = old_start + new_size;
-    findgoodplace(new_start, old_size - new_size);
-    return old_start + 4;
+  // 此处我们先计算一下被realloc的块加上周围空闲块的大小，但是先不将周围空闲块drop
+  char *start = ptr - 4;
+  unsigned int oldsize = GETSIZE(start);
+  unsigned int newsize = BLOCKSIZE(size);
+  if (oldsize == newsize) {
+    return ptr;
   }
-  char *newptr = mm_malloc(size);
-  if (newptr == NULL) {
-    return NULL;
+  char *pre = start - 4;
+  char *next = start + oldsize;
+  unsigned int copysize = size < (oldsize - 8) ? size : (oldsize - 8);
+  if (GETALLO(pre) == 0) {
+    oldsize += GETSIZE(pre);
+    start -= GETSIZE(pre);
+    // dropclass(start, getclassnum(GETSIZE(pre)));
   }
-  memcpy(newptr, ptr, old_size - 8);
-  mm_free(ptr);
-  return newptr;
+  if (GETALLO(next) == 0) {
+    oldsize += GETSIZE(next);
+    // dropclass(next, getclassnum(GETSIZE(next)));
+  }
+  // 这里获得空闲链表中的最合适空闲块
+  char *best = findbestblock(newsize);
+
+  // 和malloc一样，分找到空闲块和没找到空闲块两种
+  if (best != NULL) {
+    // 找到空闲块
+    // 考虑找到的空闲块和原块的大小区别
+    unsigned int bestsize = GETSIZE(best);
+    if (bestsize < oldsize) {
+      // 放在best里
+      dropclass(best, getclassnum(bestsize));
+      PUT(best, newsize | 1);
+      PUT_END(best, newsize | 1);
+      memcpy(best + 4, ptr, copysize);
+      findgoodplace(best + newsize, bestsize - newsize);
+      // 把malloc的块free掉
+      mm_free(ptr);
+      return best + 4;
+    } else {
+      // 放在malloc块里
+      if (GETALLO(pre) == 0) {
+        dropclass((pre - GETSIZE(pre) + 4), getclassnum(GETSIZE(pre)));
+      }
+      if (GETALLO(next) == 0) {
+        dropclass(next, getclassnum(GETSIZE(next)));
+      }
+      PUT(start, newsize | 1);
+      PUT_END(start, newsize | 1);
+      memcpy(start + 4, ptr, copysize);
+      findgoodplace(start + newsize, oldsize - newsize);
+      return start + 4;
+    }
+  } else {
+    // 没找到空闲块
+    // 则有两个情况，一个是malloc的块满足，一个是我们要继续开块
+    if (oldsize > newsize) {
+      // malloc 块满足
+      if (GETALLO(pre) == 0) {
+        dropclass((pre - GETSIZE(pre) + 4), getclassnum(GETSIZE(pre)));
+      }
+      if (GETALLO(next) == 0) {
+        dropclass(next, getclassnum(GETSIZE(next)));
+      }
+      PUT(start, newsize | 1);
+      PUT_END(start, newsize | 1);
+      memcpy(start + 4, ptr, copysize);
+      findgoodplace(start + newsize, oldsize - newsize);
+      return start + 4;
+    } else {
+      // 需要继续开块，开块的时候我们需要考虑malloc的块是不是在最后
+      char *maybeend = start + oldsize;
+      if (GETALLO(maybeend) == 1 && GETSIZE(maybeend) == 0) {
+        // 说明在最后,放在malloc块中
+        if (GETALLO(pre) == 0) {
+          dropclass((pre - GETSIZE(pre) + 4), getclassnum(GETSIZE(pre)));
+        }
+        if (GETALLO(next) == 0) {
+          dropclass(next, getclassnum(GETSIZE(next)));
+        }
+        mem_sbrk(newsize - oldsize);
+        PUT(start, newsize | 1);
+        PUT_END(start, newsize | 1);
+        memcpy(start + 4, ptr, copysize);
+        char *endpoint = (char *)mem_heap_hi() - 3;
+        PUT(endpoint, 1);
+        return start +4;
+      } else {
+        // 此处说明不在最后，直接拓展
+        char* new = extendheap(newsize);
+        memcpy(new, ptr, copysize);
+        mm_free(ptr);
+        return new;
+      }
+    }
+  }
+
+  // if (oldsize < newsize) {
+  //   // 只能效仿malloc
+  //   if (tmp == NULL) {
+  //     // 说明我们没有找到空闲的空间，则必须开辟，考虑接着之前的开还是另开
+  //     // 先将之前的两个邻居删掉
+  //     if (GETALLO(pre) == 0) {
+  //       dropclass(pre - GETSIZE(pre) + 4, getclassnum(GETSIZE(pre)));
+  //     }
+  //     if (GETALLO(next) == 0) {
+  //       dropclass(next, getclassnum(GETSIZE(next)));
+  //     }
+  //     // 查看一下这个大块后面是不是结尾
+  //     char *nnex = start + oldsize;
+  //     if (GETALLO(nnex) == 1 && GETSIZE(nnex) == 0) {
+  //       // 是结尾，就连着一起开辟
+  //       mem_sbrk(newsize - oldsize);
+  //       memcpy(start + 4, ptr, copysize);
+  //       PUT(start, newsize | 1);
+  //       PUT_END(start, newsize | 1);
+  //       char *endp = (char *)mem_heap_hi() - 3;
+  //       PUT(endp, 1);
+  //       return start + 4;
+  //     }
+  //     // 说明不是结尾，则另开辟空间，将大块放入空闲链表
+  //     char *endpp = (char *)mem_heap_hi() - 7;
+  //     int vid = GETALLO(endpp);
+  //     if (vid == 0) {
+  //       unsigned int endsize = GETSIZE(endpp);
+  //       endpp = endpp - endsize + 4;
+  //       dropclass(endpp, getclassnum(endsize));
+  //       unsigned int less_size = newsize - endsize;
+  //       mem_sbrk(less_size);
+  //       PUT(endpp, newsize | 1);
+  //       PUT_END(endpp, newsize | 1);
+  //       char *endpoint = (char *)mem_heap_hi() - 3;
+  //       PUT(endpoint, 1);
+  //       memcpy(endpp + 4, ptr, copysize);
+  //       findgoodplace(start, oldsize);
+  //       return endpp + 4;
+  //     } else {
+  //       char *newpp = mem_sbrk(newsize);
+  //       if (newpp == (void *)-1) {
+  //         return NULL;
+  //       }
+  //       newpp -= 4; // 减去之前标志结尾的4字节
+  //       newsize |= 1;
+  //       PUT(newpp, newsize);
+  //       PUT_END(newpp, newsize);
+  //       char *endpoint = (char *)mem_heap_hi() - 3;
+  //       PUT(endpoint, 1);
+  //       memcpy(newpp + 4, ptr, copysize);
+  //       findgoodplace(start, oldsize);
+  //       return newpp + 4;
+  //     }
+  //   }
+  //   // 此处代表我们找到了空闲的块，则用来放新的
+  //   unsigned int tmpsize = GETSIZE(tmp);
+  //   dropclass(tmp, getclassnum(tmpsize));
+  //   PUT(tmp, newsize | 1);
+  //   PUT_END(tmp, newsize | 1);
+  //   memcpy(tmp + 4, ptr, copysize);
+  //   findgoodplace(ptr - 4, GETSIZE(ptr - 4));
+  //   findgoodplace(tmp + newsize, tmpsize - newsize);
+  //   return tmp + 4;
+  // } else {
+  //   // 说明原块周围有空间可以放置，则可以尝试放在原块
+  //   if (tmp != NULL && classminsize < oldsize) {
+  //     // 放找到的空闲块
+  //     unsigned int tmpsize = GETSIZE(tmp);
+  //     dropclass(tmp, getclassnum(tmpsize));
+  //     PUT(tmp, newsize | 1);
+  //     PUT_END(tmp, newsize | 1);
+  //     memcpy(tmp + 4, ptr, copysize);
+  //     findgoodplace(ptr - 4, GETSIZE(ptr - 4));
+  //     findgoodplace(tmp + newsize, tmpsize - newsize);
+  //     return tmp + 4;
+  //   } else {
+  //     // 放原块
+  //     // 先将之前的两个邻居删掉
+  //     if (GETALLO(pre) == 0) {
+  //       dropclass(pre - GETSIZE(pre) + 4, getclassnum(GETSIZE(pre)));
+  //     }
+  //     if (GETALLO(next) == 0) {
+  //       dropclass(next, getclassnum(GETSIZE(next)));
+  //     }
+  //     // copy
+  //     memcpy(start + 4, ptr, copysize);
+  //     PUT(start, newsize | 1);
+  //     PUT_END(start, newsize | 1);
+  //     findgoodplace(start + newsize, oldsize - newsize);
+  //     return start + 4;
+  //   }
+  // }
 }
