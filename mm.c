@@ -1,17 +1,3 @@
-/*
-
-使用分离空闲链表，以2的幂作为大小类来存储，需要25类，每类存一个指针，需要SIZE_T_SIZE字节
-在堆空间中的每个块都需要一个头部存它的大小，可以使用4字节来表示大小和有效位
-每个块也需要一个尾部,4字节
-对于空闲块，需要两个指针，分别指向前一个空闲块和后一个空闲块，需要2×size_t字节
-故空闲块一共是8+2*size_t字节，
-小于这个数的空闲块不列入空闲链表，至少要有8个字节来存头部和尾部（不确定这种最小的情况是否存在）
-对于不空闲的块，只需要8字节的头尾即可
-对于整个空间来说，开头需要放四个字节来标志一下作为头，结尾需要四个字节来标志一下作为尾
-
-调用free的时候检查空闲块并合并
-
- */
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -49,13 +35,14 @@ char *store_start;
 // my define micro
 #define ARRSIZE (SIZE_T_SIZE * 21)
 #define MINSIZE (8 + SIZE_T_SIZE * 2)
-#define FBLOCKSIZE(x) (ALIGN(x + MINSIZE))
 #define BLOCKSIZE(x) (ALIGN(x + 8))
 #define GET(p) (*(unsigned int *)(p))
-#define PUT(p, val) (*(unsigned int *)(p) = (val))
-#define GETSIZE(p) (GET(p) & ~0x7)
-#define PUT_END(p, val) (*(unsigned int *)(p + GETSIZE(p) - 4) = val)
 #define GETALLO(p) (GET(p) & 0x1)
+#define GETSIZE(p) (GET(p) & ~0x7)
+// 处理头部和尾部，放置尾部前必须先放置头部
+#define PUT(p, val) (*(unsigned int *)(p) = (val))
+#define PUT_END(p, val) (*(unsigned int *)(p + GETSIZE(p) - 4) = val)
+// 用于处理空闲块的指针
 #define GET_PRE(p) (*(char **)(p + 4))
 #define GET_NEXT(p) (*(char **)(p + 4 + SIZE_T_SIZE))
 #define PUT_PRE(p, val) (*(char **)(p + 4) = val)
@@ -63,6 +50,10 @@ char *store_start;
 
 /*
   定义处理分离空闲链表的方法
+*/
+
+/*
+将newp块插入num这个大小类中，并会设置好newp的头部和尾部
 */
 void insertclass(char *newp, unsigned int size, int num) {
   char *tmp = ((char **)mem_start)[num];
@@ -103,6 +94,10 @@ void insertclass(char *newp, unsigned int size, int num) {
   }
 }
 
+
+/*
+在num这个大小类中删除ptr
+*/
 void dropclass(char *ptr, int num) {
   if (num == -1) {
     return;
@@ -119,6 +114,13 @@ void dropclass(char *ptr, int num) {
   }
 }
 
+/*
+utils
+*/
+
+/*
+根据size的大小确定属于分离空闲链表中的哪个大小类
+*/
 int getclassnum(unsigned int size) {
   if (size < (8 + 2 * SIZE_T_SIZE)) {
     return -1;
@@ -130,6 +132,9 @@ int getclassnum(unsigned int size) {
   return num - 4;
 }
 
+/*
+在分离空闲链表中找到最合适的地方，放置newp
+*/
 void findgoodplace(char *newp, unsigned int size) {
   int num = getclassnum(size);
   if (num == -1) {
@@ -140,6 +145,9 @@ void findgoodplace(char *newp, unsigned int size) {
   insertclass(newp, size, num);
 }
 
+/*
+找到分离空闲链表中大于size的第一个空闲块
+*/
 char *findbestblock(unsigned int size) {
   int num = getclassnum(size);
   while (num < 21) {
@@ -195,7 +203,7 @@ char *extendheap(unsigned int newsize) {
 }
 
 /*
- * mm_init - initialize the malloc package.
+ * mm_init - 构建分离空闲链表，并初始化堆的开头和结尾
  */
 int mm_init(void) {
   mem_init();
@@ -215,7 +223,7 @@ int mm_init(void) {
 }
 
 /*
-
+mm_malloc 在分离空闲链表中查找合适空闲块，没找到就拓展堆
  */
 void *mm_malloc(size_t size) {
   if (size == 0) {
@@ -245,7 +253,7 @@ void *mm_malloc(size_t size) {
 }
 
 /*
-
+mm_free free时检查前后块是否空，空的话合并
  */
 void mm_free(void *ptr) {
   char *start = ((char *)ptr - 4);
@@ -255,6 +263,7 @@ void mm_free(void *ptr) {
     printf("WRONG FREE\n");
     exit(-1);
   }
+  // 检查前后块并合并
   char *next = start + size;
   char *pre = start - 4;
   if (GETALLO(pre) == 0) {
@@ -270,10 +279,11 @@ void mm_free(void *ptr) {
   findgoodplace(start, size);
 }
 
-/*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- */
 
+ 
+/*
+ * mm_realloc, 将原块视作空闲块，模仿malloc函数
+ */
 void *mm_realloc(void *ptr, size_t size) {
   if (ptr == NULL) {
     return mm_malloc(size);
@@ -305,7 +315,7 @@ void *mm_realloc(void *ptr, size_t size) {
     // 找到空闲块
     // 考虑找到的空闲块和原块的大小区别
     unsigned int bestsize = GETSIZE(best);
-    if (bestsize < oldsize) {
+    if (bestsize < oldsize || oldsize < newsize) {
       // 放在best里
       dropclass(best, getclassnum(bestsize));
       PUT(best, newsize | 1);
@@ -323,9 +333,9 @@ void *mm_realloc(void *ptr, size_t size) {
       if (GETALLO(next) == 0) {
         dropclass(next, getclassnum(GETSIZE(next)));
       }
+      memcpy(start + 4, ptr, copysize);
       PUT(start, newsize | 1);
       PUT_END(start, newsize | 1);
-      memcpy(start + 4, ptr, copysize);
       findgoodplace(start + newsize, oldsize - newsize);
       return start + 4;
     }
@@ -340,9 +350,9 @@ void *mm_realloc(void *ptr, size_t size) {
       if (GETALLO(next) == 0) {
         dropclass(next, getclassnum(GETSIZE(next)));
       }
+      memcpy(start + 4, ptr, copysize);
       PUT(start, newsize | 1);
       PUT_END(start, newsize | 1);
-      memcpy(start + 4, ptr, copysize);
       findgoodplace(start + newsize, oldsize - newsize);
       return start + 4;
     } else {
@@ -357,113 +367,19 @@ void *mm_realloc(void *ptr, size_t size) {
           dropclass(next, getclassnum(GETSIZE(next)));
         }
         mem_sbrk(newsize - oldsize);
+        memcpy(start + 4, ptr, copysize);
         PUT(start, newsize | 1);
         PUT_END(start, newsize | 1);
-        memcpy(start + 4, ptr, copysize);
         char *endpoint = (char *)mem_heap_hi() - 3;
         PUT(endpoint, 1);
-        return start +4;
+        return start + 4;
       } else {
         // 此处说明不在最后，直接拓展
-        char* new = extendheap(newsize);
+        char *new = extendheap(newsize);
         memcpy(new, ptr, copysize);
         mm_free(ptr);
         return new;
       }
     }
   }
-
-  // if (oldsize < newsize) {
-  //   // 只能效仿malloc
-  //   if (tmp == NULL) {
-  //     // 说明我们没有找到空闲的空间，则必须开辟，考虑接着之前的开还是另开
-  //     // 先将之前的两个邻居删掉
-  //     if (GETALLO(pre) == 0) {
-  //       dropclass(pre - GETSIZE(pre) + 4, getclassnum(GETSIZE(pre)));
-  //     }
-  //     if (GETALLO(next) == 0) {
-  //       dropclass(next, getclassnum(GETSIZE(next)));
-  //     }
-  //     // 查看一下这个大块后面是不是结尾
-  //     char *nnex = start + oldsize;
-  //     if (GETALLO(nnex) == 1 && GETSIZE(nnex) == 0) {
-  //       // 是结尾，就连着一起开辟
-  //       mem_sbrk(newsize - oldsize);
-  //       memcpy(start + 4, ptr, copysize);
-  //       PUT(start, newsize | 1);
-  //       PUT_END(start, newsize | 1);
-  //       char *endp = (char *)mem_heap_hi() - 3;
-  //       PUT(endp, 1);
-  //       return start + 4;
-  //     }
-  //     // 说明不是结尾，则另开辟空间，将大块放入空闲链表
-  //     char *endpp = (char *)mem_heap_hi() - 7;
-  //     int vid = GETALLO(endpp);
-  //     if (vid == 0) {
-  //       unsigned int endsize = GETSIZE(endpp);
-  //       endpp = endpp - endsize + 4;
-  //       dropclass(endpp, getclassnum(endsize));
-  //       unsigned int less_size = newsize - endsize;
-  //       mem_sbrk(less_size);
-  //       PUT(endpp, newsize | 1);
-  //       PUT_END(endpp, newsize | 1);
-  //       char *endpoint = (char *)mem_heap_hi() - 3;
-  //       PUT(endpoint, 1);
-  //       memcpy(endpp + 4, ptr, copysize);
-  //       findgoodplace(start, oldsize);
-  //       return endpp + 4;
-  //     } else {
-  //       char *newpp = mem_sbrk(newsize);
-  //       if (newpp == (void *)-1) {
-  //         return NULL;
-  //       }
-  //       newpp -= 4; // 减去之前标志结尾的4字节
-  //       newsize |= 1;
-  //       PUT(newpp, newsize);
-  //       PUT_END(newpp, newsize);
-  //       char *endpoint = (char *)mem_heap_hi() - 3;
-  //       PUT(endpoint, 1);
-  //       memcpy(newpp + 4, ptr, copysize);
-  //       findgoodplace(start, oldsize);
-  //       return newpp + 4;
-  //     }
-  //   }
-  //   // 此处代表我们找到了空闲的块，则用来放新的
-  //   unsigned int tmpsize = GETSIZE(tmp);
-  //   dropclass(tmp, getclassnum(tmpsize));
-  //   PUT(tmp, newsize | 1);
-  //   PUT_END(tmp, newsize | 1);
-  //   memcpy(tmp + 4, ptr, copysize);
-  //   findgoodplace(ptr - 4, GETSIZE(ptr - 4));
-  //   findgoodplace(tmp + newsize, tmpsize - newsize);
-  //   return tmp + 4;
-  // } else {
-  //   // 说明原块周围有空间可以放置，则可以尝试放在原块
-  //   if (tmp != NULL && classminsize < oldsize) {
-  //     // 放找到的空闲块
-  //     unsigned int tmpsize = GETSIZE(tmp);
-  //     dropclass(tmp, getclassnum(tmpsize));
-  //     PUT(tmp, newsize | 1);
-  //     PUT_END(tmp, newsize | 1);
-  //     memcpy(tmp + 4, ptr, copysize);
-  //     findgoodplace(ptr - 4, GETSIZE(ptr - 4));
-  //     findgoodplace(tmp + newsize, tmpsize - newsize);
-  //     return tmp + 4;
-  //   } else {
-  //     // 放原块
-  //     // 先将之前的两个邻居删掉
-  //     if (GETALLO(pre) == 0) {
-  //       dropclass(pre - GETSIZE(pre) + 4, getclassnum(GETSIZE(pre)));
-  //     }
-  //     if (GETALLO(next) == 0) {
-  //       dropclass(next, getclassnum(GETSIZE(next)));
-  //     }
-  //     // copy
-  //     memcpy(start + 4, ptr, copysize);
-  //     PUT(start, newsize | 1);
-  //     PUT_END(start, newsize | 1);
-  //     findgoodplace(start + newsize, oldsize - newsize);
-  //     return start + 4;
-  //   }
-  // }
 }
